@@ -43,6 +43,102 @@ PFARPROC = POINTER(FARPROC)
 c_uchar_p = POINTER(c_ubyte)
 c_ushort_p = POINTER(c_ushort)
 
+MEM_COMMIT = 0x00001000
+MEM_DECOMMIT = 0x4000
+MEM_RELEASE = 0x8000
+MEM_RESERVE = 0x00002000
+MEM_FREE = 0x10000
+MEM_MAPPED = 0x40000
+MEM_RESET = 0x00080000
+
+PAGE_NOACCESS = 0x01
+PAGE_READONLY = 0x02
+PAGE_READWRITE = 0x04
+PAGE_WRITECOPY = 0x08
+PAGE_EXECUTE = 0x10
+PAGE_EXECUTE_READ = 0x20
+PAGE_EXECUTE_READWRITE = 0x40
+PAGE_EXECUTE_WRITECOPY = 0x80
+PAGE_NOCACHE = 0x200
+
+ProtectionFlags = ARRAY(ARRAY(ARRAY(c_int, 2), 2), 2)(
+	(
+		(PAGE_NOACCESS, PAGE_WRITECOPY),
+		(PAGE_READONLY, PAGE_READWRITE),
+	), (
+		(PAGE_EXECUTE, PAGE_EXECUTE_WRITECOPY),
+		(PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE),
+	),
+)
+
+
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_READ = 0x40000000
+IMAGE_SCN_MEM_WRITE = 0x80000000
+IMAGE_SCN_MEM_DISCARDABLE = 0x02000000
+IMAGE_SCN_MEM_NOT_CACHED = 0x04000000
+IMAGE_SCN_CNT_INITIALIZED_DATA = 0x00000040
+IMAGE_SCN_CNT_UNINITIALIZED_DATA = 0x00000080
+
+class IMAGE_BASE_RELOCATION(Structure):
+	_fields_ = [
+		('VirtualAddress', DWORD),
+		('SizeOfBlock', DWORD),
+	]
+
+PIMAGE_BASE_RELOCATION = POINTER(IMAGE_BASE_RELOCATION)
+
+IMAGE_DIRECTORY_ENTRY_EXPORT = 0
+IMAGE_DIRECTORY_ENTRY_IMPORT = 1
+IMAGE_DIRECTORY_ENTRY_RESOURCE = 2
+IMAGE_DIRECTORY_ENTRY_EXCEPTION = 3
+IMAGE_DIRECTORY_ENTRY_SECURITY = 4
+IMAGE_DIRECTORY_ENTRY_BASERELOC = 5
+IMAGE_DIRECTORY_ENTRY_DEBUG = 6
+# IMAGE_DIRECTORY_ENTRY_COPYRIGHT = 7
+IMAGE_DIRECTORY_ENTRY_ARCHITECTURE = 7
+IMAGE_DIRECTORY_ENTRY_GLOBALPTR = 8
+IMAGE_DIRECTORY_ENTRY_TLS = 9
+IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG = 10
+IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT = 11
+IMAGE_DIRECTORY_ENTRY_IAT = 12
+IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13
+IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR = 14
+
+DLL_PROCESS_ATTACH = 1
+DLL_THREAD_ATTACH = 2
+DLL_THREAD_DETACH = 3
+DLL_PROCESS_DETACH = 0
+
+INVALID_HANDLE_VALUE = -1
+
+IMAGE_SIZEOF_BASE_RELOCATION = sizeof(IMAGE_BASE_RELOCATION)
+IMAGE_REL_BASED_ABSOLUTE = 0
+IMAGE_REL_BASED_HIGH = 1
+IMAGE_REL_BASED_LOW = 2
+IMAGE_REL_BASED_HIGHLOW = 3
+IMAGE_REL_BASED_HIGHADJ = 4
+IMAGE_REL_BASED_MIPS_JMPADDR = 5
+IMAGE_REL_BASED_MIPS_JMPADDR16 = 9
+IMAGE_REL_BASED_IA64_IMM64 = 9
+IMAGE_REL_BASED_DIR64 = 10
+
+_IMAGE_ORDINAL_FLAG64 = 0x8000000000000000
+_IMAGE_ORDINAL_FLAG32 = 0x80000000
+_IMAGE_ORDINAL64 = lambda o: (o & 0xffff)
+_IMAGE_ORDINAL32 = lambda o: (o & 0xffff)
+_IMAGE_SNAP_BY_ORDINAL64 = lambda o: ((o & _IMAGE_ORDINAL_FLAG64) != 0)
+_IMAGE_SNAP_BY_ORDINAL32 = lambda o: ((o & _IMAGE_ORDINAL_FLAG32) != 0)
+IMAGE_ORDINAL = _IMAGE_ORDINAL64 if isx64 else _IMAGE_ORDINAL32
+IMAGE_SNAP_BY_ORDINAL = _IMAGE_SNAP_BY_ORDINAL64 if isx64 else _IMAGE_SNAP_BY_ORDINAL32
+IMAGE_ORDINAL_FLAG = _IMAGE_ORDINAL_FLAG64 if isx64 else _IMAGE_ORDINAL_FLAG32
+
+IMAGE_DOS_SIGNATURE = 0x5A4D # MZ
+IMAGE_OS2_SIGNATURE = 0x454E # NE
+IMAGE_OS2_SIGNATURE_LE = 0x454C # LE
+IMAGE_VXD_SIGNATURE = 0x454C # LE
+IMAGE_NT_SIGNATURE = 0x00004550 # PE00
+
 class IMAGE_SECTION_HEADER_MISC(Union):
     _fields_ = [('PhysicalAddress', DWORD), ('VirtualSize', DWORD)]
 
@@ -3558,13 +3654,87 @@ class MemoryModule(PE):
         HeapFree(GetProcessHeap(), 0, self.pythonmemorymodule)
         self.close()
 
+    def free_library(self):
+        self.dbg("Freeing dll")
+        if not bool(self.pythonmemorymodule): return
+        pmodule = pointer(self.pythonmemorymodule)
+        if self.pythonmemorymodule.contents.initialized != 0:
+            DllEntry = DllEntryProc(self.pythonmemorymodule.contents.codeBase + self.pythonmemorymodule.contents.headers.contents.OptionalHeader.AddressOfEntryPoint)
+            DllEntry(cast(self.pythonmemorymodule.contents.codeBase, HINSTANCE), DLL_PROCESS_DETACH, 0)
+            pmodule.contents.initialized = 0
+        if bool(self.pythonmemorymodule.contents.modules) and self.pythonmemorymodule.contents.numModules > 0:
+            for i in range(1, self.pythonmemorymodule.contents.numModules):
+                if self.pythonmemorymodule.contents.modules[i] != HANDLE(INVALID_HANDLE_VALUE):
+                    FreeLibrary(self.pythonmemorymodule.contents.modules[i])
+
+        if bool(self._codebaseaddr):
+            VirtualFree(self._codebaseaddr, 0, MEM_RELEASE)
+
+        HeapFree(GetProcessHeap(), 0, self.pythonmemorymodule)
+        self.close()
+        
     def free_exe(self):
-        self.dbg('Freeing exe')
-        if not bool(self.pythonmemorymodule):
-            return
+        self.dbg("Freeing exe")
+        if not bool(self.pythonmemorymodule): return
         pmodule = pointer(self.pythonmemorymodule)
         if bool(self._codebaseaddr):
-            VirtualFree(self._codebaseaddr, 0, 32768)
+            VirtualFree(self._codebaseaddr, 0, MEM_RELEASE)
+
         HeapFree(GetProcessHeap(), 0, self.pythonmemorymodule)
         self.close()
 
+    
+    def _proc_addr_by_ordinal(self, idx):
+        codebase = self._codebaseaddr
+        if idx == -1:
+            raise WindowsError('Could not find the function specified')
+        elif idx > self._exports_.NumberOfFunctions:
+            raise WindowsError('Ordinal number higher than our actual count.')
+        funcoffset = DWORD.from_address(codebase + self._exports_.AddressOfFunctions + (idx * 4))
+        return funcoffset.value
+
+    
+    def _proc_addr_by_name(self, name):
+        codebase = self._codebaseaddr
+        exports = self._exports_
+        if exports.NumberOfNames == 0:
+            raise WindowsError('DLL doesn\'t export anything.')
+
+        ordinal = -1
+        name = name.lower()
+        namerefaddr = codebase + exports.AddressOfNames
+        ordinaladdr = codebase + exports.AddressOfNamesOrdinals
+        i = 0
+        while i < exports.NumberOfNames:
+            nameref = DWORD.from_address(namerefaddr)
+            funcname = string_at(codebase + nameref.value).lower()
+            if funcname.decode() == name:
+                ordinal = WORD.from_address(ordinaladdr).value
+            i += 1
+            namerefaddr += sizeof(DWORD)
+            ordinaladdr += sizeof(WORD)
+        return self._proc_addr_by_ordinal(ordinal)
+    
+    def get_proc_addr(self, name_or_ordinal):
+        codebase = self._codebaseaddr
+        if not hasattr(self, '_exports_'):
+            directory = self.OPTIONAL_HEADER.DATA_DIRECTORY[IMAGE_DIRECTORY_ENTRY_EXPORT]
+            # No export table found
+            if directory.Size <= 0: raise WindowsError('No export table found.')
+            self._exports_ = IMAGE_EXPORT_DIRECTORY.from_address(codebase + directory.VirtualAddress)
+            if self._exports_.NumberOfFunctions == 0:
+                # DLL doesn't export anything
+                raise WindowsError('DLL doesn\'t export anything.')
+        targ = type(name_or_ordinal)
+        if targ in [ str, str, str ]:
+            name_or_ordinal = str(name_or_ordinal)
+            procaddr_func = self._proc_addr_by_name
+        elif targ in [ int, int ]:
+            name_or_ordinal = int(name_or_ordinal)
+            procaddr_func = self._proc_addr_by_ordinal
+        else:
+            raise TypeError('Don\'t know what to do with name/ordinal of type: %s!' % targ)
+
+        if not name_or_ordinal in self._foffsets_:
+            self._foffsets_[name_or_ordinal] = procaddr_func(name_or_ordinal)
+        return FARPROC(codebase + self._foffsets_[name_or_ordinal])
